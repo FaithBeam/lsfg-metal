@@ -1,0 +1,61 @@
+#!/bin/zsh
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# lsfg-metal-run - launch a program with lsfg-metal frame generation injected.
+#
+#   lsfg-metal-run [options] [--] <command> [args...]
+#
+# options:
+#   -m, --multiplier N     frame multiplier (enables environment mode, ignores conf.toml)
+#   -f, --flow F           flow scale 0.25..1.0
+#   -p, --perf             performance mode
+#   --pacing none|duration frame pacing method
+#   --dll PATH             path to Lossless.dll
+#   --log FILE             also write the log to FILE
+#   --debug                verbose logging
+#   --lib PATH             path to liblsfg-metal.dylib (default: next to this script)
+#
+# Without -m the profile is chosen from ~/.config/lsfg-metal/conf.toml.
+#
+# Note: macOS strips DYLD_* variables when a SIP-protected binary (/bin/sh, /usr/bin/env,
+# /usr/bin/perl, ...) is executed. The command must therefore be a real Mach-O binary such
+# as Wine's 'wine'/'wine64'/'wine-preloader', a game binary, or an .app's executable - not a
+# shell script wrapper. See README.md for CrossOver/Whisky/Sikarugir instructions.
+
+set -e
+
+script_dir=${0:A:h}
+lib=""
+for candidate in "$script_dir/../lib/liblsfg-metal.dylib" "$script_dir/liblsfg-metal.dylib" \
+                 "$script_dir/../build/liblsfg-metal.dylib"; do
+    if [[ -f $candidate ]]; then lib=${candidate:A}; break; fi
+done
+
+while (( $# > 0 )); do
+    case $1 in
+        -m|--multiplier) export LSFG_METAL_ENV=1 LSFG_METAL_MULTIPLIER=$2; shift 2 ;;
+        -f|--flow)       export LSFG_METAL_FLOW_SCALE=$2; shift 2 ;;
+        -p|--perf)       export LSFG_METAL_PERFORMANCE_MODE=1; shift ;;
+        --pacing)        export LSFG_METAL_PACING=$2; shift 2 ;;
+        --dll)           export LSFG_METAL_DLL_PATH=$2; shift 2 ;;
+        --log)           export LSFG_METAL_LOG=$2; shift 2 ;;
+        --debug)         export LSFG_METAL_DEBUG=1; shift ;;
+        --lib)           lib=${2:A}; shift 2 ;;
+        -h|--help)       sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --)              shift; break ;;
+        -*)              echo "lsfg-metal-run: unknown option $1" >&2; exit 1 ;;
+        *)               break ;;
+    esac
+done
+
+if (( $# == 0 )); then
+    echo "usage: lsfg-metal-run [options] [--] <command> [args...]" >&2
+    exit 1
+fi
+if [[ -z $lib || ! -f $lib ]]; then
+    echo "lsfg-metal-run: liblsfg-metal.dylib not found (use --lib)" >&2
+    exit 1
+fi
+
+export DYLD_INSERT_LIBRARIES="$lib${DYLD_INSERT_LIBRARIES:+:$DYLD_INSERT_LIBRARIES}"
+exec "$@"

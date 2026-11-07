@@ -1,0 +1,11 @@
+# build output and editor caches
+/build/
+/.cache/
+.DS_Store
+
+# test artifacts (fake DLLs, cross-compiled test programs, captures)
+*.dll
+*.exe
+*.spv
+/lsfg-capture-*/
+__pycache__/

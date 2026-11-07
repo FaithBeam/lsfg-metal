@@ -1,0 +1,103 @@
+#!/bin/zsh
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# lsfg-metal-sikarugir - run a Sikarugir (Kegworks/Wineskin-style) wrapper with lsfg-metal.
+#
+#   lsfg-metal-sikarugir [options] <Wrapper.app> [program [args...]]
+#
+# Without a program, the wrapper's configured program ("Program Name and Path" in its
+# Info.plist) is started, exactly like double-clicking the wrapper.
+#
+# options: -m N, -f F, -p, --pacing P, --dll PATH, --log FILE, --debug, --lib PATH
+#          (see lsfg-metal-run; without -m the profile comes from ~/.config/lsfg-metal/conf.toml)
+#
+# Why this is needed: the wrapper's own launcher passes the environment on to Wine but drops
+# DYLD_* variables, so DYLD_INSERT_LIBRARIES never reaches the game. This script starts the
+# wrapper's Wine directly, with the environment Sikarugir's launcher sets up (as observed with
+# Sikarugir Wine 11 wrappers), plus lsfg-metal. The wrapper itself is not modified.
+
+set -e
+
+script_dir=${0:A:h}
+lib=""
+for candidate in "$script_dir/../lib/liblsfg-metal.dylib" "$script_dir/liblsfg-metal.dylib" \
+                 "$script_dir/../build/liblsfg-metal.dylib"; do
+    if [[ -f $candidate ]]; then lib=${candidate:A}; break; fi
+done
+
+die() { print -u2 "lsfg-metal-sikarugir: $*"; exit 1 }
+
+while (( $# > 0 )); do
+    case $1 in
+        -m|--multiplier) export LSFG_METAL_ENV=1 LSFG_METAL_MULTIPLIER=$2; shift 2 ;;
+        -f|--flow)       export LSFG_METAL_FLOW_SCALE=$2; shift 2 ;;
+        -p|--perf)       export LSFG_METAL_PERFORMANCE_MODE=1; shift ;;
+        --pacing)        export LSFG_METAL_PACING=$2; shift 2 ;;
+        --dll)           export LSFG_METAL_DLL_PATH=$2; shift 2 ;;
+        --log)           export LSFG_METAL_LOG=$2; shift 2 ;;
+        --debug)         export LSFG_METAL_DEBUG=1; shift ;;
+        --lib)           lib=${2:A}; shift 2 ;;
+        -h|--help)       sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --)              shift; break ;;
+        -*)              die "unknown option $1" ;;
+        *)               break ;;
+    esac
+done
+
+(( $# >= 1 )) || die "usage: lsfg-metal-sikarugir [options] <Wrapper.app> [program [args...]]"
+[[ -n $lib && -f $lib ]] || die "liblsfg-metal.dylib not found (use --lib)"
+
+C=${1:A}/Contents; shift
+[[ -f $C/Info.plist ]] || die "not a wrapper: ${C:h}"
+S=$C/SharedSupport
+wine=$S/wine/bin/wine
+[[ -x $wine ]] || die "wine not found in wrapper: $wine"
+
+# plutil, not PlistBuddy: PlistBuddy splits key names containing spaces ("Program Name and Path")
+plist() { plutil -extract "$1" raw -o - "$C/Info.plist" 2>/dev/null || true }
+flag() { [[ "$(plist "$1")" == (1|true) ]] }
+
+export WINEPREFIX=$S/prefix
+export CX_ROOT=$S/wine
+export WINEDLLPATH=$S/wine/lib/x86_64-windows:$S/wine/lib/i386-windows:$S/wine/lib/x86_64-unix
+export DYLD_FALLBACK_LIBRARY_PATH=$S/wine/lib:$S/wine/lib64:$C/Frameworks:$C/Frameworks/GStreamer.framework/Libraries:/opt/wine/lib:/usr/lib:/usr/libexec:/usr/lib/system
+export GST_PLUGIN_PATH=$C/Frameworks/GStreamer.framework/Libraries/gstreamer-1.0
+
+R=$S/renderer
+export WINEDLLPATH_D3DMETAL=$R/d3dmetal/wine WINEDLLPATH_DXMT=$R/dxmt/wine \
+       WINEDLLPATH_D9VK=$R/d9vk/wine WINEDLLPATH_CNCD=$R/cnc_ddraw/wine
+export CX_D3DMETALPATH=$R/d3dmetal
+export CX_APPLEGPTK_LIBD3DSHARED_PATH=$R/d3dmetal/external/libd3dshared.dylib
+export CX_APPLEGPT_LIBD3DSHARED_PATH=$CX_APPLEGPTK_LIBD3DSHARED_PATH
+if flag D3DMETAL; then
+    export WINEDLLPATH_PREPEND=$WINEDLLPATH_D3DMETAL
+elif flag DXMT; then
+    export WINEDLLPATH_PREPEND=$WINEDLLPATH_DXMT
+elif flag DXVK && [[ -d $R/dxvk/wine ]]; then
+    export WINEDLLPATH_PREPEND=$R/dxvk/wine
+fi
+
+flag WINEMSYNC && export WINEMSYNC=1
+flag WINEESYNC && export WINEESYNC=1
+flag METAL_HUD && export MTL_HUD_ENABLED=1 || export MTL_HUD_ENABLED=0
+flag FASTMATH && export MVK_CONFIG_FAST_MATH_ENABLED=1 || export MVK_CONFIG_FAST_MATH_ENABLED=0
+dbg=$(plist WINEDEBUG); [[ -n $dbg ]] && export WINEDEBUG=$dbg
+export ROSETTA_ADVERTISE_AVX=1 DOTNET_EnableWriteXorExecute=0 MVK_CONFIG_RESUME_LOST_DEVICE=1 \
+       WINEBOOT_HIDE_DIALOG=1 CX_FWD_COMPAT_GL_CTX=1 DXVK_ASYNC=1 SDL_JOYSTICK_MFI=0 \
+       QMLSCENE_DEVICE=softwarecontext SikarugirAppWine11=1 \
+       DXVK_SHADER_CACHE_PATH=$HOME/.cache/dxvk
+
+export DYLD_INSERT_LIBRARIES="$lib${DYLD_INSERT_LIBRARIES:+:$DYLD_INSERT_LIBRARIES}"
+
+if (( $# > 0 )); then
+    exec "$wine" "$@"
+fi
+
+program=$(plist "Program Name and Path")
+[[ -n $program ]] || die "the wrapper has no configured program; pass one explicitly"
+flags=$(plist "Program Flags")
+target=${${:-$WINEPREFIX/drive_c$program}:A}
+[[ -e $target ]] || die "configured program not found: $target"
+cd "${target:h}"
+# like the wrapper: start the program (a .bat or .exe) and wait for it to finish
+exec "$wine" start /wait /unix "$target" ${=flags}

@@ -1,0 +1,168 @@
+#!/bin/zsh
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# lsfg-metal-crossover - run CrossOver bottles with lsfg-metal frame generation.
+#
+#   lsfg-metal-crossover enable  <bottle>             add lsfg-metal to the bottle's environment
+#   lsfg-metal-crossover disable <bottle>             remove it again
+#   lsfg-metal-crossover run [options] <bottle> <program> [args...]
+#   lsfg-metal-crossover setup                        (re)create the patched CrossOver copy
+#
+# run options: -m N, -f F, -p, --pacing P, --dll PATH, --log FILE, --debug (see lsfg-metal-run)
+# global options: --app PATH (CrossOver.app, default: auto-detect), --lib PATH (liblsfg-metal.dylib)
+#
+# Example:  lsfg-metal-crossover enable Steam
+#           lsfg-metal-crossover run Steam "C:\Program Files (x86)\Steam\steam.exe"
+#
+# Why this is needed: CrossOver's Wine loader uses the hardened runtime without the
+# allow-dyld-environment-variables entitlement, so macOS ignores DYLD_INSERT_LIBRARIES for it,
+# and its 'wine' launcher is a perl script (SIP strips DYLD_* from it). This script does NOT
+# modify CrossOver.app. 'setup' makes an APFS clone of its CrossOver directory (no extra disk
+# space) in ~/Library/Application Support/lsfg-metal/crossover and re-signs only the clone's
+# Wine loader ad-hoc with the same entitlements plus allow-dyld-environment-variables.
+# 'enable' adds DYLD_INSERT_LIBRARIES to the bottle's [EnvironmentVariables], which the clone
+# honours and the unmodified CrossOver ignores. Games started from the CrossOver window
+# therefore run without lsfg-metal; games started with 'run' (or from a Steam/launcher started
+# with 'run') get it. The clone is refreshed automatically when CrossOver is updated.
+
+set -e
+setopt extended_glob
+
+script_dir=${0:A:h}
+lib=""
+for candidate in "$script_dir/../lib/liblsfg-metal.dylib" "$script_dir/liblsfg-metal.dylib" \
+                 "$script_dir/../build/liblsfg-metal.dylib"; do
+    if [[ -f $candidate ]]; then lib=${candidate:A}; break; fi
+done
+app=""
+clone="${LSFG_METAL_CROSSOVER_DIR:-$HOME/Library/Application Support/lsfg-metal/crossover}"
+
+die() { print -u2 "lsfg-metal-crossover: $*"; exit 1 }
+
+find_app() {
+    [[ -n $app ]] && { [[ -d $app ]] || die "no such app: $app"; return }
+    for candidate in /Applications/CrossOver.app ~/Applications/CrossOver.app \
+                     /Applications/CrossOver*.app(N) ~/Applications/CrossOver*.app(N); do
+        if [[ -d $candidate/Contents/SharedSupport/CrossOver ]]; then app=${candidate:A}; return; fi
+    done
+    die "CrossOver.app not found (use --app PATH)"
+}
+
+app_version() {
+    print -r -- "$app $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist" 2>/dev/null)"
+}
+
+setup() {
+    find_app
+    local src="$app/Contents/SharedSupport/CrossOver"
+    print "lsfg-metal-crossover: cloning $src"
+    rm -rf "$clone.tmp"
+    mkdir -p "${clone:h}"
+    cp -cR "$src" "$clone.tmp" 2>/dev/null || cp -R "$src" "$clone.tmp"
+
+    local loader ent tmp
+    for loader in "$clone.tmp"/lib/wine/*-unix/wine(N); do
+        ent=$(mktemp -t lsfg-ent)
+        codesign -d --entitlements - --xml "$loader" > "$ent" 2>/dev/null || true
+        [[ -s $ent ]] || print '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict/></plist>' > "$ent"
+        /usr/libexec/PlistBuddy -c "Delete :com.apple.security.cs.allow-dyld-environment-variables" "$ent" >/dev/null 2>&1 || true
+        /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.allow-dyld-environment-variables bool true" "$ent"
+        # sign a fresh copy and move it into place: re-signing a binary in place can leave a stale
+        # cached signature for the inode, and the kernel then kills the process at launch
+        tmp="$loader.lsfg-tmp"
+        cp "$loader" "$tmp"
+        codesign --force --sign - --options runtime --entitlements "$ent" "$tmp" 2>/dev/null
+        mv -f "$tmp" "$loader"
+        rm -f "$ent"
+        arch -x86_64 "$loader" --version >/dev/null 2>&1 || [[ $loader == *aarch64* ]] \
+            || die "patched loader does not start: $loader"
+    done
+
+    app_version > "$clone.tmp/.lsfg-metal-source"
+    rm -rf "$clone"
+    mv "$clone.tmp" "$clone"
+    print "lsfg-metal-crossover: ready ($clone)"
+}
+
+ensure_setup() {
+    find_app
+    if [[ ! -f $clone/.lsfg-metal-source || "$(<$clone/.lsfg-metal-source)" != "$(app_version)" ]]; then
+        setup
+    fi
+}
+
+bottle_conf() {
+    local name=$1 dir
+    [[ -n $name ]] || die "missing bottle name"
+    for dir in ${(s.:.)CX_BOTTLE_PATH:-"$HOME/Library/Application Support/CrossOver/Bottles"}; do
+        if [[ -f $dir/$name/cxbottle.conf ]]; then print -r -- "$dir/$name/cxbottle.conf"; return; fi
+    done
+    die "bottle '$name' not found"
+}
+
+enable() {
+    local conf=$(bottle_conf "$1")
+    [[ -n $lib && -f $lib ]] || die "liblsfg-metal.dylib not found (use --lib)"
+    cp -p "$conf" "$conf.lsfg-metal-backup"
+    disable_conf "$conf"
+    local line="\"DYLD_INSERT_LIBRARIES\" = \"$lib\""
+    if grep -q '^\[EnvironmentVariables\]' "$conf"; then
+        awk -v l="$line" '{ print } /^\[EnvironmentVariables\]/ { print l }' "$conf" > "$conf.lsfg-tmp"
+    else
+        { cat "$conf"; print "\n[EnvironmentVariables]\n$line" } > "$conf.lsfg-tmp"
+    fi
+    mv -f "$conf.lsfg-tmp" "$conf"
+    print "lsfg-metal-crossover: enabled in $conf (backup: $conf.lsfg-metal-backup)"
+}
+
+disable_conf() {
+    grep -v '^"DYLD_INSERT_LIBRARIES" = ".*liblsfg-metal\.dylib"$' "$1" > "$1.lsfg-tmp" || true
+    mv -f "$1.lsfg-tmp" "$1"
+}
+
+disable() {
+    local conf=$(bottle_conf "$1")
+    disable_conf "$conf"
+    print "lsfg-metal-crossover: disabled in $conf"
+}
+
+run() {
+    while (( $# > 0 )); do
+        case $1 in
+            -m|--multiplier) export LSFG_METAL_ENV=1 LSFG_METAL_MULTIPLIER=$2; shift 2 ;;
+            -f|--flow)       export LSFG_METAL_FLOW_SCALE=$2; shift 2 ;;
+            -p|--perf)       export LSFG_METAL_PERFORMANCE_MODE=1; shift ;;
+            --pacing)        export LSFG_METAL_PACING=$2; shift 2 ;;
+            --dll)           export LSFG_METAL_DLL_PATH=$2; shift 2 ;;
+            --log)           export LSFG_METAL_LOG=$2; shift 2 ;;
+            --debug)         export LSFG_METAL_DEBUG=1; shift ;;
+            --)              shift; break ;;
+            -*)              die "unknown option $1" ;;
+            *)               break ;;
+        esac
+    done
+    (( $# >= 2 )) || die "usage: lsfg-metal-crossover run [options] <bottle> <program> [args...]"
+    local bottle=$1; shift
+    local conf=$(bottle_conf "$bottle")
+    grep -q '^"DYLD_INSERT_LIBRARIES" = ".*liblsfg-metal\.dylib"$' "$conf" \
+        || print -u2 "lsfg-metal-crossover: warning: not enabled for '$bottle' (run: lsfg-metal-crossover enable $bottle)"
+    ensure_setup
+    exec "$clone/bin/wine" --bottle "$bottle" "$@"
+}
+
+while (( $# > 0 )); do
+    case $1 in
+        --app) app=${2:A}; shift 2 ;;
+        --lib) lib=${2:A}; shift 2 ;;
+        -h|--help) sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) break ;;
+    esac
+done
+
+case $1 in
+    setup)   setup ;;
+    enable)  enable "$2" ;;
+    disable) disable "$2" ;;
+    run)     shift; run "$@" ;;
+    *)       sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac
