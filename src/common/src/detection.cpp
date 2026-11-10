@@ -279,9 +279,6 @@ fs::path ls::findShaderDll(const std::optional<std::string>& configured) {
     // CrossOver
     for (const auto& b : subdirs(home / "Library/Application Support/CrossOver/Bottles"))
         prefixes.push_back(b);
-    // Whisky
-    for (const auto& b : subdirs(home / "Library/Containers/com.isaacmarovitz.Whisky/Bottles"))
-        prefixes.push_back(b);
     // Sikarugir / Kegworks / Wineskin style wrappers
     for (const char* dir : { "Applications/Sikarugir", "Applications/Kegworks", "Applications/Wineskin" })
         for (const auto& app : subdirs(home / dir))

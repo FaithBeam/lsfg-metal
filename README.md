@@ -1,6 +1,6 @@
 # lsfg-metal
 
-A macOS port of [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk). It runs Lossless Scaling frame generation on Metal. It works with native Metal apps and with Windows games under Wine, including **D3DMetal** (Apple Game Porting Toolkit, CrossOver, Sikarugir, Whisky). It also works with DXVK/MoltenVK and DXMT.
+A macOS port of [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk). It runs Lossless Scaling frame generation on Metal. It works with native Metal apps and with Windows games under Wine, including **D3DMetal** (Apple Game Porting Toolkit, CrossOver, Sikarugir). It also works with DXVK/MoltenVK and DXMT.
 
 Like lsfg-vk, it ships no shaders. You need your own copy of **Lossless Scaling** (Steam) for `Lossless.dll`.
 
@@ -107,8 +107,6 @@ The script does **not** modify CrossOver.app:
 
 So games started from the CrossOver window run without lsfg-metal, and games started through `lsfg-metal-crossover run` get it. Starting Steam (or another launcher) through `run` is enough: its child processes get it too. Your `conf.toml` profiles decide which games actually use frame generation. The clone is refreshed automatically when CrossOver updates.
 
-**Whisky** (untested). Whisky launches Wine itself, so run its bundled wine binary from a terminal, as in "Plain wine" above (`~/Library/Application Support/com.isaacmarovitz.Whisky/Libraries/Wine/bin/wine64`, `WINEPREFIX=<bottle path>`).
-
 **Checking that it works.** Set `LSFG_METAL_LOG=/tmp/lsfg.log`; add `LSFG_METAL_DEBUG=1` to also see `loaded into <process>` for every process it reaches. A working setup logs these lines:
 
 ```
@@ -164,7 +162,7 @@ force_vsync = true
 
 **Finding `Lossless.dll`.** The automatic search checks, in order:
 1. `$WINEPREFIX`;
-2. CrossOver bottles, Whisky bottles, Sikarugir/Kegworks/Wineskin wrappers in `~/Applications`, Heroic prefixes and `~/.wine`, including extra Steam libraries listed in `libraryfolders.vdf`;
+2. CrossOver bottles, Sikarugir/Kegworks/Wineskin wrappers in `~/Applications`, Heroic prefixes and `~/.wine`, including extra Steam libraries listed in `libraryfolders.vdf`;
 3. the macOS Steam folder;
 4. the current directory.
 
@@ -226,7 +224,6 @@ x86_64-w64-mingw32-gcc -O2 -o d3d11test.exe tests/d3d11test/d3d11test.c -ld3d11 
   - mean error is about 2.5× lower than cross-fading or repeating frames (≈3.5 vs ≈9 on a 0–255 scale);
   - some edge warping remains where background is revealed or covered, which is normal for optical-flow interpolation.
 - **Tested in a real game:** S.T.A.L.K.E.R. Anomaly / GAMMA (D3D11 → D3DMetal) in a Sikarugir wrapper via `lsfg-metal-sikarugir`: 1080p, 2x, performance mode, 60 → 120 fps on a 120 Hz display.
-- **Not tested:** the Whisky setup.
 - Generated frames add latency, as on Linux. The real frame is shown after the generated ones.
 - Frame generation needs more drawables, and the GPU time grows with resolution. Use `performance_mode` and a lower `flow_scale` at high resolutions.
 - Games that render with OpenGL (wined3d) are not supported. lsfg-metal needs a `CAMetalLayer`.

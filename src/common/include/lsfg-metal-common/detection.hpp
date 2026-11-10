@@ -45,7 +45,7 @@ namespace ls {
 
     /// locate Lossless.dll
     ///
-    /// Search order: explicit path, $WINEPREFIX, Steam libraries of CrossOver / Whisky /
+    /// Search order: explicit path, $WINEPREFIX, Steam libraries of CrossOver /
     /// Sikarugir / Kegworks / Heroic prefixes, macOS Steam, executable directory, cwd.
     /// @throws ls::error if not found
     std::filesystem::path findShaderDll(const std::optional<std::string>& configured);

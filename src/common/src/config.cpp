@@ -47,7 +47,7 @@ void ConfigFile::createDefaultConfigFile(const std::filesystem::path& path) {
 
 [global]
 # Path to Lossless.dll. If unset, lsfg-metal searches the current Wine prefix,
-# CrossOver/Whisky/Sikarugir bottles and the macOS Steam library.
+# CrossOver/Sikarugir bottles and the macOS Steam library.
 # dll = '/Users/me/Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam/steamapps/common/Lossless Scaling/Lossless.dll'
 allow_fp16 = true # Apple GPUs have fast fp16, leave this on
 

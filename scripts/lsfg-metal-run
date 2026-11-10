@@ -20,7 +20,7 @@
 # Note: macOS strips DYLD_* variables when a SIP-protected binary (/bin/sh, /usr/bin/env,
 # /usr/bin/perl, ...) is executed. The command must therefore be a real Mach-O binary such
 # as Wine's 'wine'/'wine64'/'wine-preloader', a game binary, or an .app's executable - not a
-# shell script wrapper. See README.md for CrossOver/Whisky/Sikarugir instructions.
+# shell script wrapper. See README.md for CrossOver/Sikarugir instructions.
 
 set -e
 
