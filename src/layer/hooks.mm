@@ -91,6 +91,7 @@ namespace {
 namespace {
     char kPendingKey;
     char kSignalKey;
+    char kCommitKey;
     char kLayerStateKey;
 
     /// thread-specific "lsfg-metal itself is calling" flag.
@@ -117,6 +118,38 @@ namespace {
         ~InternalScope() { pthread_setspecific(internalKey(), previous); }
         InternalScope(const InternalScope&) = delete;
         InternalScope& operator=(const InternalScope&) = delete;
+    };
+
+    /// bare-present path: the LSFGDrawableSignal of the command buffer whose scheduled handler
+    /// is running on this thread (unretained; the command buffer keeps it alive)
+    pthread_key_t scheduledKey() {
+        static pthread_key_t key;
+        static pthread_once_t once = PTHREAD_ONCE_INIT;
+        pthread_once(&once, [] { pthread_key_create(&key, nullptr); });
+        return key;
+    }
+
+    /// bare-present path: the LSFGDrawableSignal of the last command buffer committed on this
+    /// thread (retained)
+    pthread_key_t committedKey() {
+        static pthread_key_t key;
+        static pthread_once_t once = PTHREAD_ONCE_INIT;
+        pthread_once(&once, [] { pthread_key_create(&key, [](void* p) { if (p) CFRelease(p); }); });
+        return key;
+    }
+
+    void setCommitted(LSFGDrawableSignal* signal) {
+        void* previous = pthread_getspecific(committedKey());
+        pthread_setspecific(committedKey(), signal ? (void*)CFBridgingRetain(signal) : nullptr);
+        if (previous)
+            CFRelease(previous);
+    }
+
+    /// an MTLEvent per game command queue, signalled at the end of each of its command buffers
+    /// (one event per queue keeps the signalled values increasing)
+    struct QueueSync {
+        id<MTLEvent> event;
+        std::atomic<uint64_t> value{0};
     };
 
     /// log the first invocation of a hook (debug builds of bug reports)
@@ -224,6 +257,9 @@ namespace {
         bool loading{false};
         bool failed{false};
         std::set<bool> preparing; // modes currently compiling
+
+        std::mutex queueMutex;
+        std::unordered_map<void*, QueueSync*> queues; // game queue -> sync (never freed)
     };
 
     std::mutex& devicesMutex() {
@@ -248,6 +284,14 @@ namespace {
         ds->device = device;
         map.emplace(key, ds);
         return ds;
+    }
+
+    /// like deviceState(), but nullptr for devices lsfg-metal hasn't seen a layer of
+    DeviceState* findDeviceState(id<MTLDevice> device) {
+        const std::lock_guard<std::mutex> lock(devicesMutex());
+        auto& map = devices();
+        auto it = map.find((__bridge void*)device);
+        return it != map.end() ? it->second : nullptr;
     }
 
     /// kick off (or check) asynchronous backend initialization; returns true when usable
@@ -837,6 +881,34 @@ namespace {
         return true;
     }
 
+    /// bare-present path: signal the queue's event at the end of a game command buffer, so a
+    /// later -[CAMetalDrawable present] for a drawable it renders can wait for it
+    void recordCommit(id<MTLCommandBuffer> cb) {
+        DeviceState* ds = findDeviceState(cb.device);
+        id<MTLCommandQueue> queue = cb.commandQueue;
+        if (!ds || !queue)
+            return;
+        LSFG_TRACE_ONCE(std::string("-[") + object_getClassName(cb) + " commit]");
+        QueueSync* qs;
+        {
+            const std::lock_guard<std::mutex> lock(ds->queueMutex);
+            QueueSync*& entry = ds->queues[(__bridge void*)queue];
+            if (!entry) {
+                entry = new QueueSync();
+                entry->event = [ds->device newEvent];
+            }
+            qs = entry;
+        }
+        const uint64_t value = qs->value.fetch_add(1) + 1;
+        [cb encodeSignalEvent:qs->event value:value];
+
+        LSFGDrawableSignal* signal = [LSFGDrawableSignal new];
+        signal->event = qs->event;
+        signal->value = value;
+        objc_setAssociatedObject(cb, &kCommitKey, signal, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        setCommitted(signal);
+    }
+
     void hookCommandBufferClass(Class cls) {
         using PresentFn = void (*)(id, SEL, id);
         hook<PresentFn>(cls, @selector(presentDrawable:), [](PresentFn orig) {
@@ -865,6 +937,8 @@ namespace {
             return ^(id self) {
                 LSFGPendingPresent* pending = objc_getAssociatedObject(self, &kPendingKey);
                 if (!pending) {
+                    if (!isInternal() && global().enabled.load(std::memory_order_relaxed))
+                        recordCommit(self);
                     orig(self, @selector(commit));
                     return;
                 }
@@ -877,6 +951,27 @@ namespace {
                 orig(self, @selector(commit));
 
                 submitFrame(ds, pending->drawable, ds->event, value, cb);
+            };
+        });
+
+        // MoltenVK (e.g. CrossOver's 1.2.10) presents with -[CAMetalDrawable present] from a
+        // scheduled handler of the command buffer that renders the frame: tell the present
+        // hook which command buffer that is
+        using AddHandlerFn = void (*)(id, SEL, MTLCommandBufferHandler);
+        hook<AddHandlerFn>(cls, @selector(addScheduledHandler:), [](AddHandlerFn orig) {
+            return ^(id self, MTLCommandBufferHandler block) {
+                if (!block || isInternal() || !global().enabled.load(std::memory_order_relaxed)) {
+                    orig(self, @selector(addScheduledHandler:), block);
+                    return;
+                }
+                MTLCommandBufferHandler wrapped = ^(id<MTLCommandBuffer> cb) {
+                    void* previous = pthread_getspecific(scheduledKey());
+                    pthread_setspecific(scheduledKey(),
+                        (__bridge void*)objc_getAssociatedObject(cb, &kCommitKey));
+                    block(cb);
+                    pthread_setspecific(scheduledKey(), previous);
+                };
+                orig(self, @selector(addScheduledHandler:), wrapped);
             };
         });
     }
@@ -914,13 +1009,27 @@ namespace {
         if (isInternal())
             return false;
         LSFGDrawableSignal* signal = objc_getAssociatedObject(drawable, &kSignalKey);
+        if (signal) { // Metal 4: signalDrawable: recorded the event
+            objc_setAssociatedObject(drawable, &kSignalKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            id<CAMetalDrawable> md = drawable;
+            DeviceState* ds = deviceState(md.texture.device);
+            submitFrame(ds, md, signal->event, signal->value, nil);
+            return true;
+        }
+
+        // bare present: wait for the command buffer whose scheduled handler is presenting, or
+        // else for the last one committed on this thread (present after waitUntilScheduled)
+        signal = (__bridge LSFGDrawableSignal*)pthread_getspecific(scheduledKey());
+        if (!signal)
+            signal = (__bridge LSFGDrawableSignal*)pthread_getspecific(committedKey());
         if (!signal)
             return false;
-        objc_setAssociatedObject(drawable, &kSignalKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-        id<CAMetalDrawable> md = drawable;
-        DeviceState* ds = deviceState(md.texture.device);
-        submitFrame(ds, md, signal->event, signal->value, nil);
+        setCommitted(nil); // used up: never pair a later present with this commit
+        DeviceState* ds = nullptr;
+        if (!wantsDrawable(drawable, &ds) || signal->event.device != ds->device)
+            return false;
+        LSFG_TRACE_ONCE("bare present path");
+        submitFrame(ds, (id<CAMetalDrawable>)drawable, signal->event, signal->value, nil);
         return true;
     }
 
@@ -961,6 +1070,7 @@ namespace {
             if (!probedDevices().insert((__bridge void*)device).second)
                 return;
         }
+        deviceState(device); // recordCommit only signals for known devices
 
         @autoreleasepool {
             const InternalScope internal;

@@ -5,6 +5,8 @@
  *
  *   --mode classic   [commandBuffer presentDrawable:] + commit           (also MoltenVK)
  *   --mode mtl4      MTL4CommandQueue waitForDrawable/signalDrawable + [drawable present]
+ *   --mode scheduled [drawable present] from a scheduled handler      (MoltenVK 1.2.10, CrossOver)
+ *   --mode waitscheduled  commit + waitUntilScheduled + [drawable present]
  *
  * Renders a vertical bar sweeping across the window (classic) or a cycling clear color
  * (mtl4), prints how many of its own drawables were actually presented.
@@ -125,6 +127,17 @@ fragment float4 bar_fragment(V in [[stage_in]]) { return float4(1.0, 0.85, 0.2, 
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
     [enc endEncoding];
 
+    if (g_options.mode == "scheduled") { // MoltenVK 1.2.10 (CrossOver)
+        [cb addScheduledHandler:^(id<MTLCommandBuffer>) { [drawable present]; }];
+        [cb commit];
+        return;
+    }
+    if (g_options.mode == "waitscheduled") {
+        [cb commit];
+        [cb waitUntilScheduled];
+        [drawable present];
+        return;
+    }
     if (g_options.present == "duration")
         [cb presentDrawable:drawable afterMinimumDuration:1.0 / g_options.fps];
     else if (g_options.present == "time")
@@ -265,7 +278,7 @@ int main(int argc, const char** argv) {
             else if (f == "rgb10a2") g_options.format = MTLPixelFormatRGB10A2Unorm;
             else { std::fprintf(stderr, "unknown format %s\n", f.c_str()); return 1; }
         } else {
-            std::fprintf(stderr, "usage: %s [--mode classic|mtl4] [--present drawable|duration|time] "
+            std::fprintf(stderr, "usage: %s [--mode classic|mtl4|scheduled|waitscheduled][--present drawable|duration|time] "
                 "[--format bgra8|bgra8srgb|rgba16f|rgb10a2] [--fps N] [--seconds N] [--drawables 2|3] [--cpu-ms N] [--edr]\n", argv[0]);
             return 1;
         }
