@@ -20,7 +20,8 @@
 # Note: macOS strips DYLD_* variables when a SIP-protected binary (/bin/sh, /usr/bin/env,
 # /usr/bin/perl, ...) is executed. The command must therefore be a real Mach-O binary such
 # as Wine's 'wine'/'wine64'/'wine-preloader', a game binary, or an .app's executable - not a
-# shell script wrapper. See README.md for CrossOver/Sikarugir instructions.
+# shell script wrapper. An .app bundle path is resolved to its executable, so Steam launch
+# options 'lsfg-metal-run %command%' work. See README.md for CrossOver/Sikarugir instructions.
 
 set -e
 
@@ -41,7 +42,7 @@ while (( $# > 0 )); do
         --log)           export LSFG_METAL_LOG=$2; shift 2 ;;
         --debug)         export LSFG_METAL_DEBUG=1; shift ;;
         --lib)           lib=${2:A}; shift 2 ;;
-        -h|--help)       sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)       sed -n '3,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         --)              shift; break ;;
         -*)              echo "lsfg-metal-run: unknown option $1" >&2; exit 1 ;;
         *)               break ;;
@@ -51,6 +52,19 @@ done
 if (( $# == 0 )); then
     echo "usage: lsfg-metal-run [options] [--] <command> [args...]" >&2
     exit 1
+fi
+# Steam on macOS expands %command% to the .app bundle, which can't be exec'd. Resolve it to
+# the bundle's real executable (resolved before DYLD_INSERT_LIBRARIES is exported).
+if [[ -d $1 && $1 == *.app(/|) ]]; then
+    bundle=${1%/}
+    exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Contents/Info.plist" 2>/dev/null) \
+        || exe=${${bundle:t}%.app}
+    if [[ ! -x $bundle/Contents/MacOS/$exe ]]; then
+        echo "lsfg-metal-run: can't find the executable in $bundle" >&2
+        exit 1
+    fi
+    shift
+    set -- "$bundle/Contents/MacOS/$exe" "$@"
 fi
 if [[ -z $lib || ! -f $lib ]]; then
     echo "lsfg-metal-run: liblsfg-metal.dylib not found (use --lib)" >&2

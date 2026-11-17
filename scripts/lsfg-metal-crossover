@@ -20,10 +20,14 @@
 # modify CrossOver.app. 'setup' makes an APFS clone of its CrossOver directory (no extra disk
 # space) in ~/Library/Application Support/lsfg-metal/crossover and re-signs only the clone's
 # Wine loader ad-hoc with the same entitlements plus allow-dyld-environment-variables.
-# 'enable' adds DYLD_INSERT_LIBRARIES to the bottle's [EnvironmentVariables], which the clone
-# honours and the unmodified CrossOver ignores. Games started from the CrossOver window
-# therefore run without lsfg-metal; games started with 'run' (or from a Steam/launcher started
-# with 'run') get it. The clone is refreshed automatically when CrossOver is updated.
+# 'enable' copies liblsfg-metal.dylib to ~/Library/Application Support/lsfg-metal (a fixed path
+# that survives upgrades, e.g. Homebrew's versioned Cellar path) and adds DYLD_INSERT_LIBRARIES
+# pointing at that copy to the bottle's [EnvironmentVariables], which the clone honours and the
+# unmodified CrossOver ignores. 'run' refreshes the copy from the installed library. Games
+# started from the CrossOver window therefore run without lsfg-metal; games started with 'run'
+# (or from a Steam/launcher started with 'run') get it. The clone is refreshed automatically when CrossOver is updated.
+# ARM64 bottles (CrossOver 27+) use a loader that can't be re-signed; for them the clone's
+# winemac.so loads the library instead, and 'run' disables it unless the bottle is enabled.
 
 set -e
 setopt extended_glob
@@ -36,6 +40,8 @@ for candidate in "$script_dir/../lib/liblsfg-metal.dylib" "$script_dir/liblsfg-m
 done
 app=""
 clone="${LSFG_METAL_CROSSOVER_DIR:-$HOME/Library/Application Support/lsfg-metal/crossover}"
+stable_lib="${clone:h}/liblsfg-metal.dylib"
+conf_re='^"DYLD_INSERT_LIBRARIES" = ".*liblsfg-metal\.dylib"$'
 
 die() { print -u2 "lsfg-metal-crossover: $*"; exit 1 }
 
@@ -48,8 +54,79 @@ find_app() {
     die "CrossOver.app not found (use --app PATH)"
 }
 
+# identifies the CrossOver build a clone was made from, plus the clone format (bump it when setup
+# changes, so existing clones are rebuilt)
 app_version() {
-    print -r -- "$app $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist" 2>/dev/null)"
+    print -r -- "$app $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist" 2>/dev/null) format 2"
+}
+
+# Appends an LC_LOAD_WEAK_DYLIB load command for $2 to the thin 64-bit Mach-O $1, in the padding
+# after the existing load commands. Does nothing if it is already there. The file must be re-signed.
+add_weak_dylib() {
+    perl - "$1" "$2" <<'EOF'
+use strict;
+my ($file, $name) = @ARGV;
+open(my $fh, '+<:raw', $file) or die "$file: $!\n";
+read($fh, my $hdr, 32) == 32 or die "$file: short read\n";
+my ($magic, undef, undef, undef, $ncmds, $sizeofcmds) = unpack('V6', $hdr);
+die "$file: not a thin 64-bit Mach-O\n" unless $magic == 0xfeedfacf;
+read($fh, my $cmds, $sizeofcmds) == $sizeofcmds or die "$file: short read\n";
+my ($off, $first) = (0, undef);
+for (1 .. $ncmds) {
+    my ($cmd, $size) = unpack('V2', substr($cmds, $off, 8));
+    if ($cmd == 0x19) {                                     # LC_SEGMENT_64: find the first section
+        my $nsects = unpack('V', substr($cmds, $off + 64, 4));
+        for my $i (0 .. $nsects - 1) {
+            my $s = $off + 72 + $i * 80;
+            my $soff = unpack('V', substr($cmds, $s + 48, 4));
+            my $type = unpack('V', substr($cmds, $s + 64, 4)) & 0xff;
+            next if $type == 0x01 || $type == 0x0c || $type == 0x12;   # zerofill
+            $first = $soff if $soff && (!defined $first || $soff < $first);
+        }
+    } elsif ($cmd == 0xc || $cmd == 0x80000018) {           # LC_LOAD_DYLIB / LC_LOAD_WEAK_DYLIB
+        my $noff = unpack('V', substr($cmds, $off + 8, 4));
+        my ($n) = unpack('Z*', substr($cmds, $off + $noff, $size - $noff));
+        exit 0 if $n eq $name;
+    }
+    $off += $size;
+}
+die "$file: no sections\n" unless defined $first;
+my $cmdsize = (24 + length($name) + 1 + 7) & ~7;
+my $free = $first - 32 - $sizeofcmds;
+die "$file: not enough header space ($cmdsize bytes needed, $free free)\n" if $cmdsize > $free;
+seek($fh, 32 + $sizeofcmds, 0);
+read($fh, my $gap, $cmdsize);
+die "$file: header padding is not empty\n" if $gap =~ /[^\0]/;
+my $lc = pack('V6', 0x80000018, $cmdsize, 24, 2, 0, 0) . $name;
+seek($fh, 32 + $sizeofcmds, 0);
+print $fh $lc . "\0" x ($cmdsize - length($lc));
+seek($fh, 16, 0);
+print $fh pack('V2', $ncmds + 1, $sizeofcmds + $cmdsize);
+close($fh) or die "$file: $!\n";
+EOF
+}
+
+# ARM64 bottles run lib/wine/aarch64-unix/wine.app, which can't be re-signed: macOS kills any
+# ad-hoc signed copy at launch (it needs CodeWeavers' provisioning-profile entitlement
+# cross-architecture-support). It does have disable-library-validation, though, so it loads
+# modified libraries. winemac.so (Wine's Mac driver; every process with a window, i.e. every game,
+# loads it) gets a weak load command for liblsfg-metal.dylib next to it, a symlink to the fixed
+# copy. Weak: if the library is missing, Wine runs without it.
+patch_arm64() {
+    local dir=$1/lib/wine/aarch64-unix so tmp
+    so=$dir/winemac.so
+    [[ -f $so ]] || return 0
+    tmp="$so.lsfg-tmp"
+    cp "$so" "$tmp"
+    if add_weak_dylib "$tmp" "@loader_path/liblsfg-metal.dylib" \
+        && codesign --force --sign - "$tmp" 2>/dev/null; then
+        mv -f "$tmp" "$so"
+        ln -sf "$stable_lib" "$dir/liblsfg-metal.dylib"
+        touch "$1/.lsfg-metal-arm64"
+    else
+        rm -f "$tmp"
+        print -u2 "lsfg-metal-crossover: warning: could not patch $so; ARM64 bottles are not supported"
+    fi
 }
 
 setup() {
@@ -77,6 +154,7 @@ setup() {
         arch -x86_64 "$loader" --version >/dev/null 2>&1 || [[ $loader == *aarch64* ]] \
             || die "patched loader does not start: $loader"
     done
+    patch_arm64 "$clone.tmp"
 
     app_version > "$clone.tmp/.lsfg-metal-source"
     rm -rf "$clone"
@@ -100,23 +178,49 @@ bottle_conf() {
     die "bottle '$name' not found"
 }
 
-enable() {
-    local conf=$(bottle_conf "$1")
-    [[ -n $lib && -f $lib ]] || die "liblsfg-metal.dylib not found (use --lib)"
-    cp -p "$conf" "$conf.lsfg-metal-backup"
+is_arm64() {
+    grep -q '^"WineArch" *= *"arm64"' "$1"
+}
+
+# The bottle config stores an absolute path, but the installed library can move (Homebrew's
+# Cellar path changes with every upgrade, and the old one is deleted by cleanup). Bottles therefore
+# point at a copy in a fixed place, refreshed from the installed library. The copy is written to a
+# temporary file and renamed, so games that are running keep their mapped (old) file.
+install_lib() {
+    if [[ -n $lib && -f $lib && $lib != "$stable_lib" ]] && ! cmp -s "$lib" "$stable_lib"; then
+        mkdir -p "${stable_lib:h}"
+        cp "$lib" "$stable_lib.tmp"
+        mv -f "$stable_lib.tmp" "$stable_lib"
+    fi
+    [[ -f $stable_lib ]] || die "liblsfg-metal.dylib not found (use --lib)"
+}
+
+# path of the library the bottle is enabled with (empty if not enabled)
+conf_lib() {
+    grep -m1 "$conf_re" "$1" | sed 's/^"DYLD_INSERT_LIBRARIES" = "\(.*\)"$/\1/'
+}
+
+add_conf() {
+    local conf=$1 line="\"DYLD_INSERT_LIBRARIES\" = \"$stable_lib\""
     disable_conf "$conf"
-    local line="\"DYLD_INSERT_LIBRARIES\" = \"$lib\""
     if grep -q '^\[EnvironmentVariables\]' "$conf"; then
         awk -v l="$line" '{ print } /^\[EnvironmentVariables\]/ { print l }' "$conf" > "$conf.lsfg-tmp"
     else
         { cat "$conf"; print "\n[EnvironmentVariables]\n$line" } > "$conf.lsfg-tmp"
     fi
     mv -f "$conf.lsfg-tmp" "$conf"
+}
+
+enable() {
+    local conf=$(bottle_conf "$1")
+    install_lib
+    cp -p "$conf" "$conf.lsfg-metal-backup"
+    add_conf "$conf"
     print "lsfg-metal-crossover: enabled in $conf (backup: $conf.lsfg-metal-backup)"
 }
 
 disable_conf() {
-    grep -v '^"DYLD_INSERT_LIBRARIES" = ".*liblsfg-metal\.dylib"$' "$1" > "$1.lsfg-tmp" || true
+    grep -v "$conf_re" "$1" > "$1.lsfg-tmp" || true
     mv -f "$1.lsfg-tmp" "$1"
 }
 
@@ -144,9 +248,23 @@ run() {
     (( $# >= 2 )) || die "usage: lsfg-metal-crossover run [options] <bottle> <program> [args...]"
     local bottle=$1; shift
     local conf=$(bottle_conf "$bottle")
-    grep -q '^"DYLD_INSERT_LIBRARIES" = ".*liblsfg-metal\.dylib"$' "$conf" \
-        || print -u2 "lsfg-metal-crossover: warning: not enabled for '$bottle' (run: lsfg-metal-crossover enable $bottle)"
+    local current=$(conf_lib "$conf")
+    if [[ -z $current ]]; then
+        print -u2 "lsfg-metal-crossover: warning: not enabled for '$bottle' (run: lsfg-metal-crossover enable $bottle)"
+        # in ARM64 bottles the clone always loads the library (see patch_arm64): keep it inert
+        export LSFG_METAL_DISABLE=1
+    else
+        install_lib
+        if [[ $current != "$stable_lib" ]]; then
+            # enabled by an older version with the installed path: switch to the fixed copy
+            add_conf "$conf"
+            print -u2 "lsfg-metal-crossover: updated library path in $conf"
+        fi
+    fi
     ensure_setup
+    if is_arm64 "$conf" && [[ ! -f $clone/.lsfg-metal-arm64 ]]; then
+        die "this CrossOver version's Wine could not be patched for ARM64 bottles like '$bottle'"
+    fi
     exec "$clone/bin/wine" --bottle "$bottle" "$@"
 }
 
@@ -154,7 +272,7 @@ while (( $# > 0 )); do
     case $1 in
         --app) app=${2:A}; shift 2 ;;
         --lib) lib=${2:A}; shift 2 ;;
-        -h|--help) sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '3,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) break ;;
     esac
 done
@@ -164,5 +282,5 @@ case $1 in
     enable)  enable "$2" ;;
     disable) disable "$2" ;;
     run)     shift; run "$@" ;;
-    *)       sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *)       sed -n '3,31p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

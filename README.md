@@ -15,9 +15,10 @@ Like lsfg-vk, it ships no shaders. You need your own copy of **Lossless Scaling*
 
 Every Metal swapchain on macOS goes through `CAMetalLayer`. Hooking it therefore covers D3DMetal, MoltenVK, DXMT and native games with one mechanism.
 
-**Present interception.** It handles both present styles:
+**Present interception.** It handles three present styles:
 - Classic: `-[MTLCommandBuffer presentDrawable:*]` followed by `commit`.
 - Metal 4: `-[MTL4CommandQueue signalDrawable:]` followed by `-[CAMetalDrawable present]`.
+- Bare present: `-[CAMetalDrawable present]` from a scheduled handler of the command buffer that renders the frame, or after `waitUntilScheduled`. CrossOver's MoltenVK (1.2.10) presents this way. Each game command buffer signals an event of its queue when committed, and frame generation waits for the event of the command buffer that presents.
 
 D3DMetal uses `presentDrawable:afterMinimumDuration:`.
 
@@ -41,7 +42,25 @@ The layer is set to `framebufferOnly = NO`, at least 3 drawables, and display sy
 
 **Shader loading.** Shaders compile in the background on first use. Frames pass through untouched until they are ready (about 0.3 s on M-series GPUs).
 
-## Building
+## Installing
+
+With [Homebrew](https://brew.sh):
+
+```sh
+brew install FaithBeam/tap/lsfg-metal
+```
+
+Or download `lsfg-metal-<version>-macos-universal.tar.gz` from the [releases](https://github.com/FaithBeam/lsfg-metal/releases) and unpack it anywhere. Keep `bin/` and `lib/` side by side, because the scripts find the library at `../lib`. The release binaries are not notarized. If you downloaded with a browser, remove the quarantine flag, or macOS will refuse to load the library into games:
+
+```sh
+xattr -dr com.apple.quarantine lsfg-metal-<version>-macos-universal
+```
+
+Downloading with `curl -LO` doesn't set the flag.
+
+Then run `lsfg-metal-cli find-dll` to check that your `Lossless.dll` is found.
+
+## Building from source
 
 You need the Xcode SDK, CMake ≥ 3.20, and git.
 
@@ -62,6 +81,8 @@ The library is universal (arm64 + x86_64). Wine/CrossOver/D3DMetal run as x86_64
 ```sh
 lsfg-metal-run -m 2 /Applications/SomeGame.app/Contents/MacOS/SomeGame
 ```
+
+**Native Steam.** Set the game's launch options to `/full/path/to/lsfg-metal-run -m 2 %command%`. On macOS Steam expands `%command%` to the `.app` bundle; `lsfg-metal-run` resolves a bundle to its `CFBundleExecutable` and runs that directly.
 
 ### Wine / D3DMetal
 
@@ -103,7 +124,10 @@ Why this is needed: CrossOver's Wine loader is notarized with the hardened runti
 The script does **not** modify CrossOver.app:
 - `setup` (run automatically) makes an APFS clone of `CrossOver.app/Contents/SharedSupport/CrossOver` in `~/Library/Application Support/lsfg-metal/crossover`. A clone uses no extra disk space.
 - In that clone it re-signs only the Wine loader, ad-hoc, with its original entitlements plus `allow-dyld-environment-variables`.
-- `enable` adds `DYLD_INSERT_LIBRARIES` to the bottle's `[EnvironmentVariables]`. The patched clone honours it; the original CrossOver ignores it.
+- `enable` copies `liblsfg-metal.dylib` to `~/Library/Application Support/lsfg-metal/` and adds `DYLD_INSERT_LIBRARIES`, pointing at that copy, to the bottle's `[EnvironmentVariables]`. The patched clone honours it; the original CrossOver ignores it.
+- The copy has a fixed path, so the bottle keeps working when the installed library moves, for example when Homebrew upgrades it. Every `run` refreshes the copy from the installed library. Bottles enabled by an older version are switched to the copy automatically.
+
+**ARM64 bottles.** CrossOver 27 can create ARM64 bottles (`"WineArch" = "arm64"` in `cxbottle.conf`). These run a different loader, `lib/wine/aarch64-unix/wine.app`. It needs a provisioning-profile entitlement (`com.apple.developer.cross-architecture-support`), and macOS kills any ad-hoc re-signed copy of it at launch, so the loader is left as signed. It does allow loading modified libraries (`disable-library-validation`). `setup` therefore adds a weak load of `liblsfg-metal.dylib` (a symlink to the fixed copy) to the clone's `aarch64-unix/winemac.so`, Wine's Mac driver, which every process with a window loads. `enable`, `disable` and `run` work the same as for x86-64 bottles: for a bottle that isn't enabled, `run` sets `LSFG_METAL_DISABLE=1`.
 
 So games started from the CrossOver window run without lsfg-metal, and games started through `lsfg-metal-crossover run` get it. Starting Steam (or another launcher) through `run` is enough: its child processes get it too. Your `conf.toml` profiles decide which games actually use frame generation. The clone is refreshed automatically when CrossOver updates.
 
