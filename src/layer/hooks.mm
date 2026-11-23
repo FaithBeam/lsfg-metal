@@ -42,6 +42,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <fstream>
 #include <memory>
@@ -1177,6 +1178,12 @@ namespace {
 // winemac.so, every builtin DLL's unix side and D3DMetal long before anything is presented.
 //
 // Consequence: this image must not rely on static initializers (checked by CMake).
+//
+// The same goes for the initializers of its dependencies, libc++ among them. Since macOS 27,
+// libc++'s typed operator new (used inside libc++.dylib, e.g. by std::string::append) aborts
+// when libc++'s initializer has not run yet. So before allocating anything, the bootstrap
+// dlopen()s this image once: dyld then runs the pending initializers of the image and of
+// everything it links against (the constructor below re-enters the bootstrap and returns).
 
 namespace {
     std::atomic<int> g_bootstrapState{0}; // 0 = not done, 1 = in progress, 2 = done (constant-initialized)
@@ -1189,7 +1196,7 @@ namespace {
             return; // done or in progress on another thread
 
         const char* disable = std::getenv("LSFG_METAL_DISABLE");
-        if (disable && *disable && std::string(disable) != "0") {
+        if (disable && *disable && std::strcmp(disable, "0") != 0) {
             g_bootstrapState = 2;
             return;
         }
@@ -1199,6 +1206,12 @@ namespace {
             g_bootstrapState = 0;
             return;
         }
+
+        // run the initializers dyld skipped (see above); a no-op where they already ran.
+        // (dlopen from this image is not interposed; the handle is kept on purpose.)
+        Dl_info self{};
+        if (dladdr(reinterpret_cast<const void*>(&lsfgMetalBootstrap), &self) && self.dli_fname)
+            dlopen(self.dli_fname, RTLD_LAZY | RTLD_GLOBAL);
 
         @autoreleasepool {
             hookLayerClass();
