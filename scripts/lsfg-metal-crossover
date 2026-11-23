@@ -19,7 +19,8 @@
 # and its 'wine' launcher is a perl script (SIP strips DYLD_* from it). This script does NOT
 # modify CrossOver.app. 'setup' makes an APFS clone of its CrossOver directory (no extra disk
 # space) in ~/Library/Application Support/lsfg-metal/crossover and re-signs only the clone's
-# Wine loader ad-hoc with the same entitlements plus allow-dyld-environment-variables.
+# Wine loader (and bin/wineloader, the native launcher that starts it) ad-hoc with the same
+# entitlements plus allow-dyld-environment-variables.
 # 'enable' copies liblsfg-metal.dylib to ~/Library/Application Support/lsfg-metal (a fixed path
 # that survives upgrades, e.g. Homebrew's versioned Cellar path) and adds DYLD_INSERT_LIBRARIES
 # pointing at that copy to the bottle's [EnvironmentVariables], which the clone honours and the
@@ -57,7 +58,7 @@ find_app() {
 # identifies the CrossOver build a clone was made from, plus the clone format (bump it when setup
 # changes, so existing clones are rebuilt)
 app_version() {
-    print -r -- "$app $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist" 2>/dev/null) format 2"
+    print -r -- "$app $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist" 2>/dev/null) format 3"
 }
 
 # Appends an LC_LOAD_WEAK_DYLIB load command for $2 to the thin 64-bit Mach-O $1, in the padding
@@ -137,8 +138,12 @@ setup() {
     mkdir -p "${clone:h}"
     cp -cR "$src" "$clone.tmp" 2>/dev/null || cp -R "$src" "$clone.tmp"
 
+    # bin/wineloader (a native launcher in newer CrossOver; 'wine' execs it, and it execs the real
+    # loader) needs the entitlement too: otherwise dyld strips DYLD_* from its environment and the
+    # real loader never sees DYLD_INSERT_LIBRARIES
     local loader ent tmp
-    for loader in "$clone.tmp"/lib/wine/*-unix/wine(N); do
+    for loader in "$clone.tmp"/bin/wineloader(N) "$clone.tmp"/lib/wine/*-unix/wine(N); do
+        [[ $(file -b "$loader") == Mach-O* ]] || continue
         ent=$(mktemp -t lsfg-ent)
         codesign -d --entitlements - --xml "$loader" > "$ent" 2>/dev/null || true
         [[ -s $ent ]] || print '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict/></plist>' > "$ent"

@@ -123,7 +123,7 @@ Why this is needed: CrossOver's Wine loader is notarized with the hardened runti
 
 The script does **not** modify CrossOver.app:
 - `setup` (run automatically) makes an APFS clone of `CrossOver.app/Contents/SharedSupport/CrossOver` in `~/Library/Application Support/lsfg-metal/crossover`. A clone uses no extra disk space.
-- In that clone it re-signs only the Wine loader, ad-hoc, with its original entitlements plus `allow-dyld-environment-variables`.
+- In that clone it re-signs only the Wine loader and `bin/wineloader` (the native launcher that starts it), ad-hoc, with its original entitlements plus `allow-dyld-environment-variables`.
 - `enable` copies `liblsfg-metal.dylib` to `~/Library/Application Support/lsfg-metal/` and adds `DYLD_INSERT_LIBRARIES`, pointing at that copy, to the bottle's `[EnvironmentVariables]`. The patched clone honours it; the original CrossOver ignores it.
 - The copy has a fixed path, so the bottle keeps working when the installed library moves, for example when Homebrew upgrades it. Every `run` refreshes the copy from the installed library. Bottles enabled by an older version are switched to the copy automatically.
 
