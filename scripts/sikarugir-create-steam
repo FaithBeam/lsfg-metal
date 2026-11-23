@@ -1,0 +1,159 @@
+#!/bin/zsh
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# sikarugir-create-steam - create a Sikarugir wrapper with Steam installed in it, without the GUI.
+#
+#   sikarugir-create-steam [options]
+#
+# options: --name NAME        wrapper name (default: Steam)
+#          --dest DIR         where to put NAME.app (default: ~/Applications/Sikarugir)
+#          --engine ENGINE    engine name (WS12WineSikarugir10.0_6) or path to a .tar.xz
+#                             (default: the newest WS12WineSikarugir* in Creator's Engines folder)
+#          --template APP     template .app (default: the newest one in Creator's Template folder)
+#          --renderer R       d3dmetal (default), dxmt or dxvk
+#          --no-steam         only create the wrapper and its prefix; do not install Steam
+#          --force            replace NAME.app if it already exists
+#
+# Does what Sikarugir Creator does (copy the Template, unpack the Engine into
+# Contents/SharedSupport/wine, remove quarantine, give the wrapper its own name and bundle id,
+# run "wineskinlauncher WSS-wineprefixcreate"), then installs Steam silently and makes steam.exe the
+# wrapper's program. Engines and Templates are the ones Creator downloads to
+# ~/Library/Application Support/Sikarugir; an engine that is missing there is downloaded.
+#
+# Use a WineSikarugir engine: with WineCX 24.0.7, Steam fails with
+# "Unexpected Transport Error 0x3008".
+
+set -e
+setopt null_glob
+
+die() { print -u2 "sikarugir-create-steam: $*"; exit 1 }
+say() { print "==> $*" }
+
+support="$HOME/Library/Application Support/Sikarugir"
+name=Steam
+dest="$HOME/Applications/Sikarugir"
+engine=""
+template=""
+renderer=d3dmetal
+install_steam=1
+force=0
+
+while (( $# > 0 )); do
+    case $1 in
+        --name)     name=$2; shift 2 ;;
+        --dest)     dest=$2; shift 2 ;;
+        --engine)   engine=$2; shift 2 ;;
+        --template) template=$2; shift 2 ;;
+        --renderer) renderer=$2; shift 2 ;;
+        --no-steam) install_steam=0; shift ;;
+        --force)    force=1; shift ;;
+        -h|--help)  sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *)          die "unknown argument $1 (see --help)" ;;
+    esac
+done
+
+[[ $renderer == (d3dmetal|dxmt|dxvk) ]] || die "--renderer must be d3dmetal, dxmt or dxvk"
+[[ -n $name && $name != */* ]] || die "invalid --name"
+
+# --- template --------------------------------------------------------------------------------
+if [[ -z $template ]]; then
+    templates=("$support"/Template/Template-*.app(On))   # newest version first
+    (( ${#templates} )) || die "no template in $support/Template; open Sikarugir Creator once to download it"
+    template=${templates[1]}
+fi
+[[ -f $template/Contents/Info.plist && -x $template/Contents/MacOS/launcher ]] || die "not a Sikarugir template: $template"
+
+# --- engine ----------------------------------------------------------------------------------
+if [[ -z $engine ]]; then
+    engines=("$support"/Engines/WS12WineSikarugir*.tar.xz(On))
+    (( ${#engines} )) || engines=("$support/Engines/WS12WineSikarugir10.0_6.tar.xz")
+    engine=${engines[1]}
+elif [[ $engine != */* ]]; then
+    engine="$support/Engines/${engine%.tar.xz}.tar.xz"
+fi
+if [[ ! -f $engine ]]; then
+    [[ ${engine:h} == "$support/Engines" ]] || die "engine not found: $engine"
+    say "Downloading engine ${engine:t}"
+    mkdir -p "$support/Engines"
+    curl -fL --progress-bar -o "$engine.part" \
+        "https://github.com/Sikarugir-App/Engines/releases/download/v1.0/${engine:t}" \
+        || { rm -f "$engine.part"; die "engine download failed: ${engine:t}" }
+    mv "$engine.part" "$engine"
+fi
+[[ ${engine:t} == *WineCX* ]] && print -u2 "warning: Steam's web UI does not work with WineCX engines; use WineSikarugir"
+
+# --- wrapper ---------------------------------------------------------------------------------
+app=${dest:A}/$name.app
+C=$app/Contents
+S=$C/SharedSupport
+if [[ -e $app ]]; then
+    (( force )) || die "$app already exists (use --force to replace it)"
+    pgrep -f "$S/wine/" >/dev/null && die "$app is running; quit it first"
+    rm -rf "$app"
+fi
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/sikarugir-steam.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+
+say "Creating $app from ${template:t}"
+mkdir -p "${app:h}"
+ditto "$template" "$app"
+
+say "Unpacking engine ${engine:t}"
+tar -xJf "$engine" -C "$tmp"
+[[ -x $tmp/wswine.bundle/bin/wine ]] || die "unexpected engine layout in ${engine:t}"
+rm -rf "$S/wine"
+mv "$tmp/wswine.bundle" "$S/wine"
+
+xattr -drs com.apple.quarantine "$app" 2>/dev/null || true
+
+# Info.plist: own name and bundle id (Creator appends 8 random digits), renderer, msync.
+plist=$C/Info.plist
+pset() { plutil -replace "$1" "-$2" "$3" "$plist" }
+id_name=${name//[^A-Za-z0-9]/}
+pset CFBundleName string "$name"
+printf -v id_num '%08d' $(( (RANDOM * 32768 + RANDOM) % 100000000 ))   # not in $(): RANDOM repeats there
+pset CFBundleIdentifier string "com.sikarugir.${id_name:-Wrapper}$id_num"
+pset D3DMETAL integer $([[ $renderer == d3dmetal ]] && print 1 || print 0)
+pset DXMT     integer $([[ $renderer == dxmt ]] && print 1 || print 0)
+pset DXVK     integer $([[ $renderer == dxvk ]] && print 1 || print 0)
+pset WINEESYNC integer 1
+pset WINEMSYNC integer 1
+
+# The launcher blocks until Wine is done; wineserver -w also catches stragglers.
+wine_wait() {
+    WINEPREFIX=$S/prefix DYLD_FALLBACK_LIBRARY_PATH=$S/wine/lib:$C/Frameworks \
+        "$S/wine/bin/wineserver" -w 2>/dev/null || true
+}
+
+say "Creating the Wine prefix (this takes a minute)"
+"$C/MacOS/wineskinlauncher" WSS-wineprefixcreate
+wine_wait
+[[ -f $S/prefix/system.reg ]] || die "prefix creation failed; see $C/Logs"
+
+if (( install_steam )); then
+    say "Downloading SteamSetup.exe"
+    setup=$S/prefix/drive_c/SteamSetup.exe
+    curl -fL --progress-bar -o "$setup" \
+        https://cdn.cloudflare.steamstatic.com/client/installer/SteamSetup.exe \
+        || die "SteamSetup.exe download failed"
+
+    # The launcher drops arguments after a program given on its command line, so /S would be
+    # lost and the installer would show its wizard. Its configured program does get its flags:
+    # make the installer the program for one run.
+    say "Installing Steam silently"
+    pset "Program Name and Path" string "/SteamSetup.exe"
+    pset "Program Flags" string "/S"
+    "$C/MacOS/launcher" >/dev/null
+    wine_wait
+    rm -f "$setup"
+    pset "Program Flags" string ""
+
+    steam_exe="$S/prefix/drive_c/Program Files (x86)/Steam/steam.exe"
+    [[ -f $steam_exe ]] || die "Steam was not installed (no $steam_exe); see $C/Logs"
+    pset "Program Name and Path" string "/Program Files (x86)/Steam/steam.exe"
+fi
+
+say "Done: $app"
+(( install_steam )) && print "    Start it with: open ${(q)app}"
+print "    With lsfg-metal: lsfg-metal-sikarugir ${(q)app}"
