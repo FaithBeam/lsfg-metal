@@ -2,7 +2,8 @@
 # with a universal binary tarball and a ready-to-use Homebrew formula.
 #
 # Optional: set the repository secret TAP_TOKEN (a token with write access to
-# <owner>/homebrew-tap) to have releases update Formula/lsfg-metal.rb there automatically.
+# <owner>/homebrew-lsfg-metal, i.e. the tap "<owner>/lsfg-metal") to have releases update
+# Formula/lsfg-metal.rb there automatically.
 name: build
 
 on:
@@ -113,7 +114,7 @@ jobs:
       - name: Update Homebrew tap
         if: env.TAP_TOKEN != ''
         run: |
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/${GITHUB_REPOSITORY_OWNER}/homebrew-tap.git" tap
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/${GITHUB_REPOSITORY_OWNER}/homebrew-lsfg-metal.git" tap
           mkdir -p tap/Formula
           cp dist/lsfg-metal.rb tap/Formula/lsfg-metal.rb
           cd tap

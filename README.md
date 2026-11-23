@@ -47,7 +47,7 @@ The layer is set to `framebufferOnly = NO`, at least 3 drawables, and display sy
 With [Homebrew](https://brew.sh):
 
 ```sh
-brew install FaithBeam/tap/lsfg-metal
+brew install FaithBeam/lsfg-metal/lsfg-metal
 ```
 
 Or download `lsfg-metal-<version>-macos-universal.tar.gz` from the [releases](https://github.com/FaithBeam/lsfg-metal/releases) and unpack it anywhere. Keep `bin/` and `lib/` side by side, because the scripts find the library at `../lib`. The release binaries are not notarized. If you downloaded with a browser, remove the quarantine flag, or macOS will refuse to load the library into games:

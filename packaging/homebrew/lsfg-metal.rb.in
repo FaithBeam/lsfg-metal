@@ -1,6 +1,6 @@
 # Homebrew formula template. The release workflow (.github/workflows/build.yml) fills in
 # @REPO@, @TAG@ and @REVISION@, attaches the result to the GitHub release as lsfg-metal.rb and,
-# if the TAP_TOKEN secret is set, commits it to <owner>/homebrew-tap as Formula/lsfg-metal.rb.
+# if the TAP_TOKEN secret is set, commits it to <owner>/homebrew-lsfg-metal as Formula/lsfg-metal.rb.
 class LsfgMetal < Formula
   desc "Lossless Scaling frame generation for Metal games and Wine/D3DMetal on macOS"
   homepage "https://github.com/@REPO@"
