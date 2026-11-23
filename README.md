@@ -4,6 +4,11 @@ A macOS port of [lsfg-vk](https://github.com/PancakeTAS/lsfg-vk). It runs Lossle
 
 Like lsfg-vk, it ships no shaders. You need your own copy of **Lossless Scaling** (Steam) for `Lossless.dll`.
 
+> [!WARNING]
+> **Anti-cheat.** lsfg-metal is loaded into the game's own process and hooks its Metal calls (see [How it works](#how-it-works)). Anti-cheat software may treat this as cheating, however harmless the intent. Lossless Scaling on Windows is different: it captures the screen from outside the game. Under Wine, the library is native macOS code, so it doesn't appear in the game's list of Windows modules. It still shares the game's memory, though, and it has not been tested against any anti-cheat. Many online games also ban any software that modifies the client, whether or not it's detected.
+>
+> **Use it in single-player and offline games only**, unless a game's developer says tools like this are allowed. The Wine launchers (`lsfg-metal-sikarugir`, `lsfg-metal-crossover`) load it into every process of the wrapper or bottle, including Steam. Any bans are your own responsibility.
+
 ## How it works
 
 | lsfg-vk (Linux) | lsfg-metal (macOS) |
