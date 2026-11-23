@@ -20,7 +20,7 @@ jobs:
   build:
     runs-on: macos-26   # Xcode 26+: the test app uses Metal 4 (MTL4CommandQueue)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -71,7 +71,7 @@ jobs:
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.package.outputs.name }}
           path: |
@@ -89,9 +89,9 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
