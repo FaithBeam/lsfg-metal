@@ -1,0 +1,124 @@
+# Builds and tests every push and pull request. A pushed tag v* also publishes a GitHub release
+# with a universal binary tarball and a ready-to-use Homebrew formula.
+#
+# Optional: set the repository secret TAP_TOKEN (a token with write access to
+# <owner>/homebrew-tap) to have releases update Formula/lsfg-metal.rb there automatically.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+      # the post-build step also runs cmake/check_initializers.sh on the hook library
+      - name: Build
+        run: cmake --build build -j "$(sysctl -n hw.ncpu)"
+
+      - name: Check architectures
+        run: |
+          for f in build/liblsfg-metal.dylib build/lsfg-metal-cli; do
+            archs=$(lipo -archs "$f")
+            echo "$f: $archs"
+            [[ $archs == *arm64* && $archs == *x86_64* ]] || { echo "::error::$f is not universal"; exit 1; }
+          done
+
+      # GitHub's macOS runners are VMs that may not expose a Metal device; skip (with a warning)
+      # only in that case, fail on anything else.
+      - name: Self-test with the synthetic DLL
+        run: |
+          brew install glslang
+          python3 tests/build_fake_dll.py "$RUNNER_TEMP/fake.dll"
+          if out=$(build/lsfg-metal-cli selftest --dll "$RUNNER_TEMP/fake.dll" 2>&1); then
+            echo "$out"
+          else
+            echo "$out"
+            if grep -q "no Metal device" <<<"$out"; then
+              echo "::warning::no Metal device on this runner, self-test skipped"
+            else
+              exit 1
+            fi
+          fi
+
+      - name: Package
+        id: package
+        run: |
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            version=${GITHUB_REF_NAME#v}
+          else
+            version=0.0.0-${GITHUB_SHA::7}
+          fi
+          name=lsfg-metal-$version-macos-universal
+          cmake --install build --prefix "dist/$name"
+          cp README.md LICENSE.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Render Homebrew formula
+        run: |
+          sed -e "s|@REPO@|$GITHUB_REPOSITORY|g" \
+              -e "s|@TAG@|$GITHUB_REF_NAME|g" \
+              -e "s|@REVISION@|$GITHUB_SHA|g" \
+              packaging/homebrew/lsfg-metal.rb.in > dist/lsfg-metal.rb
+          ! grep -n '@[A-Z]*@' dist/lsfg-metal.rb
+
+      - name: Create release
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "lsfg-metal ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            --verify-tag
+
+      - name: Update Homebrew tap
+        if: env.TAP_TOKEN != ''
+        run: |
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/${GITHUB_REPOSITORY_OWNER}/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp dist/lsfg-metal.rb tap/Formula/lsfg-metal.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/lsfg-metal.rb
+          git commit -m "lsfg-metal ${GITHUB_REF_NAME#v}"
+          git push

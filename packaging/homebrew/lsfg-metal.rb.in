@@ -1,0 +1,50 @@
+# Homebrew formula template. The release workflow (.github/workflows/build.yml) fills in
+# @REPO@, @TAG@ and @REVISION@, attaches the result to the GitHub release as lsfg-metal.rb and,
+# if the TAP_TOKEN secret is set, commits it to <owner>/homebrew-tap as Formula/lsfg-metal.rb.
+class LsfgMetal < Formula
+  desc "Lossless Scaling frame generation for Metal games and Wine/D3DMetal on macOS"
+  homepage "https://github.com/@REPO@"
+  url "https://github.com/@REPO@.git",
+      tag:      "@TAG@",
+      revision: "@REVISION@"
+  license "GPL-3.0-or-later"
+  head "https://github.com/@REPO@.git", branch: "main"
+
+  depends_on "cmake" => :build
+  depends_on :macos
+
+  def install
+    # Universal on purpose: Wine/CrossOver/D3DMetal games run as x86_64 under Rosetta 2, native
+    # games as arm64, and the same dylib is injected into both. Superenv strips -arch otherwise.
+    ENV.permit_arch_flags
+    system "cmake", "-S", ".", "-B", "build",
+                    "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64",
+                    "-DLSFGMETAL_BUILD_TESTS=OFF",
+                    *std_cmake_args
+    system "cmake", "--build", "build"
+    system "cmake", "--install", "build"
+  end
+
+  def caveats
+    <<~EOS
+      lsfg-metal needs the shaders from your own copy of Lossless Scaling (Steam).
+      Check that Lossless.dll is found with:
+        lsfg-metal-cli find-dll
+
+      Sikarugir/Kegworks/Wineskin wrappers: start them with
+        lsfg-metal-sikarugir ~/Applications/Sikarugir/MyGame.app
+      (the wrapper's own launcher drops DYLD_* variables; the wrapper is not modified).
+
+      CrossOver bottles enabled with `lsfg-metal-crossover enable` use a copy of the
+      library in ~/Library/Application Support/lsfg-metal, refreshed by every
+      `lsfg-metal-crossover run`, so they keep working across upgrades.
+    EOS
+  end
+
+  test do
+    archs = shell_output("lipo -archs #{lib}/liblsfg-metal.dylib")
+    assert_match "arm64", archs
+    assert_match "x86_64", archs
+    assert_match "usage: lsfg-metal-cli", shell_output("#{bin}/lsfg-metal-cli help")
+  end
+end
